@@ -1,5 +1,4 @@
 flask
 firebase-admin
 sentence-transformers
-torch==1.13.1
 nltk
