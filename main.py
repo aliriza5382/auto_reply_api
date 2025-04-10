@@ -1,45 +1,48 @@
 from flask import Flask, request, jsonify
 import firebase_admin
 from firebase_admin import credentials, firestore
-from transformers import AutoTokenizer, AutoModel
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-import string
+from sklearn.metrics.pairwise import cosine_similarity
+from transformers import AutoTokenizer
+import onnxruntime as ort
 import nltk
 from nltk.corpus import stopwords
-import torch
+import string
 import os
 
 # NLTK stopwords indir
 nltk.download('stopwords')
 stop_words = set(stopwords.words('turkish'))
 
-# Hafif transformer model (GPU istemez)
+# ONNX modeli (distilbert-base-multilingual-cased)
 MODEL_NAME = "distilbert-base-multilingual-cased"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModel.from_pretrained(MODEL_NAME)
+onnx_model_path = "onnx_model/distilbert-base-multilingual-cased.onnx"
+session = ort.InferenceSession(onnx_model_path)
 
 # Firebase bağlantısı
 cred = credentials.Certificate("businessmodel-ca2ce-firebase-adminsdk-fbsvc-54114476b3.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# Flask app
+# Flask uygulaması
 app = Flask(__name__)
 
-# Ön işleme fonksiyonu
+# Ön işleme
 def preprocess(text):
     text = text.lower()
     text = text.translate(str.maketrans('', '', string.punctuation))
-    words = [word for word in text.split() if word not in stop_words]
-    return ' '.join(words)
+    return ' '.join([word for word in text.split() if word not in stop_words])
 
-# Embedding alma fonksiyonu (CLS token)
+# ONNX ile embed çıkar
 def get_embedding(text):
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding=True)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    return outputs.last_hidden_state[:, 0, :].squeeze().numpy()
+    tokens = tokenizer(text, return_tensors="np", padding="max_length", truncation=True, max_length=128)
+    inputs_onnx = {
+        "input_ids": tokens["input_ids"],
+        "attention_mask": tokens["attention_mask"]
+    }
+    outputs = session.run(None, inputs_onnx)
+    return outputs[0][:, 0, :]  # CLS token
 
 @app.route("/auto_reply", methods=["POST"])
 def auto_reply():
@@ -76,8 +79,8 @@ def auto_reply():
 
     try:
         new_vec = get_embedding(cleaned)
-        old_vecs = [get_embedding(q) for q in previous_questions]
-        similarities = cosine_similarity([new_vec], old_vecs)[0]
+        old_vecs = np.vstack([get_embedding(q) for q in previous_questions])
+        similarities = cosine_similarity(new_vec, old_vecs)[0]
 
         best_score = float(np.max(similarities))
         best_index = int(np.argmax(similarities))
@@ -97,7 +100,7 @@ def auto_reply():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# Render'da dışa açık port kullan
+# Render uyumlu port
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(debug=False, host="0.0.0.0", port=port)
