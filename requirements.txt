@@ -1,4 +1,6 @@
 flask
 firebase-admin
-sentence-transformers
 nltk
+transformers==4.41.2
+scikit-learn
+numpy
